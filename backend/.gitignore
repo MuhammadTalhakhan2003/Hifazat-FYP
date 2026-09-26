@@ -1,0 +1,47 @@
+# Environments
+.env
+venv*/
+venv/
+env/
+env.bak/
+venv.bak/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# Other
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+.txt
+.sh
+# SSH keys - never commit
+password
+password.pub
+*.pem
+id_*
+.env.*
+!.env.example
