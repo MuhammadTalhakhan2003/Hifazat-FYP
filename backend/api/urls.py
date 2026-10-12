@@ -34,8 +34,9 @@ urlpatterns = [
     path('auth/login/', TokenObtainPairView.as_view(), name='token_obtain_pair'), # JWT Login
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),      # JWT Refresh
     path('auth/logout/', TokenBlacklistView.as_view(), name='token_blacklist'),   # Blacklists the refresh token
-    # path('auth/password-reset/', include('django_rest_passwordreset.urls', namespace='password_reset')), # If using package
-    # TODO: Add custom password reset URLs if implementing manually
+    path('auth/password-reset/', views.PasswordResetRequestView.as_view(), name='password_reset_request'),         # Emails a 6-digit code
+    path('auth/password-reset/verify/', views.PasswordResetVerifyView.as_view(), name='password_reset_verify'),    # Checks the code
+    path('auth/password-reset/confirm/', views.PasswordResetConfirmView.as_view(), name='password_reset_confirm'), # Sets the new password
 
     # --- User Management ---
     path('users/me/', views.UserProfileView.as_view(), name='user_profile'),

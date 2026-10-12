@@ -265,3 +265,21 @@ class NotificationSerializer(serializers.ModelSerializer):
             'is_read', 'created_at', 'related_incident', 'related_incident_title'
         ]
         read_only_fields = ('id', 'user', 'created_at', 'related_incident', 'related_incident_title', 'notification_type', 'content') # User sets 'is_read' via action
+
+# --- Password Reset Serializers ---
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+class PasswordResetVerifySerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.RegexField(r'^\d{6}$', error_messages={'invalid': 'Enter the 6-digit code.'})
+
+class PasswordResetConfirmSerializer(PasswordResetVerifySerializer):
+    new_password = serializers.CharField(write_only=True, style={'input_type': 'password'})
+    new_password2 = serializers.CharField(write_only=True, style={'input_type': 'password'}, label="Confirm New Password")
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['new_password2']:
+            raise serializers.ValidationError({"new_password": "Password fields didn't match."})
+        return attrs

@@ -169,3 +169,23 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"Notification for {self.user.username}: {self.notification_type}"
+
+# Password Reset Codes Table
+class PasswordResetCode(models.Model):
+    """A short-lived 6-digit code emailed to a user who forgot their password.
+    Only a hash of the code is stored, never the code itself."""
+    user = models.ForeignKey(User, related_name='password_reset_codes', on_delete=models.CASCADE)
+    code_hash = models.CharField(max_length=128)
+    created_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    attempts = models.PositiveSmallIntegerField(default=0)  # Wrong guesses so far
+    is_used = models.BooleanField(default=False)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'created_at']),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Password reset code for {self.user.username} ({self.created_at:%Y-%m-%d %H:%M})"

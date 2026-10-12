@@ -25,6 +25,49 @@ class AuthService {
     }
   }
 
+  // --- Forgot password: email -> 6-digit code -> new password ---
+
+  // Asks the backend to email a 6-digit reset code. Returns the server's message.
+  Future<String> requestPasswordReset(String email) async {
+    final response = await _dio.post('/auth/password-reset/', data: {'email': email});
+    return response.data['detail'] as String;
+  }
+
+  // Throws a DioException (400) if the code is wrong or expired.
+  Future<void> verifyPasswordResetCode(String email, String code) async {
+    await _dio.post('/auth/password-reset/verify/', data: {'email': email, 'code': code});
+  }
+
+  Future<void> confirmPasswordReset({
+    required String email,
+    required String code,
+    required String newPassword,
+    required String newPassword2,
+  }) async {
+    await _dio.post('/auth/password-reset/confirm/', data: {
+      'email': email,
+      'code': code,
+      'new_password': newPassword,
+      'new_password2': newPassword2,
+    });
+  }
+
+  // Turns a DRF error response ({"detail": ...} or {"field": ["msg", ...]}) into one readable message.
+  static String errorMessage(Object error) {
+    if (error is DioException) {
+      final data = error.response?.data;
+      if (data is Map) {
+        if (data['detail'] != null) return data['detail'].toString();
+        for (final value in data.values) {
+          if (value is List && value.isNotEmpty) return value.first.toString();
+          if (value is String) return value;
+        }
+      }
+      if (error.response == null) return 'Could not reach the server. Check your connection.';
+    }
+    return 'Something went wrong. Please try again.';
+  }
+
   // NOTE: This method will not be called in the workaround, but we leave it here.
   Future<TokenRefreshResponse> refreshToken(TokenRefreshRequest request) async {
     try {

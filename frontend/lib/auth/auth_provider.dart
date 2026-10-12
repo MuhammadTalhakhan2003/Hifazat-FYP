@@ -1,4 +1,6 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:hifazat_app/api/services/auth_service.dart';
 import 'package:hifazat_app/api/models/auth.dart';
 import 'package:hifazat_app/auth/auth_repository.dart';
 // import 'package:hifazat_app/providers/user_provider.dart';
@@ -58,7 +60,9 @@ class AuthProvider with ChangeNotifier {
       return true;
     } catch (e) {
       debugPrint("[AuthProvider] Login failed for user: $username. Error: $e");
-      _errorMessage = 'Login failed. Please check your credentials.';
+      _errorMessage = e is DioException && e.response?.statusCode == 401
+          ? 'Incorrect username or password.'
+          : AuthService.errorMessage(e);
       _authState = AuthState.unauthenticated;
       notifyListeners();
       return false;
@@ -86,7 +90,7 @@ class AuthProvider with ChangeNotifier {
       return true;
     } catch (e) {
       debugPrint("[AuthProvider] Registration failed for user: $username. Error: $e");
-      _errorMessage = 'Registration failed. User may already exist or data is invalid.';
+      _errorMessage = AuthService.errorMessage(e);
       _authState = AuthState.unauthenticated;
       notifyListeners();
       return false;

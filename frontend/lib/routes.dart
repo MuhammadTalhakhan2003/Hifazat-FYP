@@ -1,4 +1,5 @@
 import 'package:flutter/widgets.dart';
+import 'package:hifazat_app/screens/auth/forgot_password_screen.dart';
 import 'package:hifazat_app/screens/auth/login_screen.dart';
 import 'package:hifazat_app/screens/auth/registration_screen.dart';
 import 'package:hifazat_app/screens/checkout_screen.dart';
@@ -12,6 +13,7 @@ class AppRoutes {
   static const String splash = '/';
   static const String login = '/login';
   static const String register = '/register';
+  static const String forgotPassword = '/forgot-password';
   static const String home = '/home'; // This is now the MainScreen with the nav bar
   static const String reportIncident = '/report-incident';
   // stats, profile etc. are now part of MainScreen, so we don't need separate routes for them
@@ -23,6 +25,7 @@ class AppRoutes {
     splash: (context) => const SplashScreen(),
     login: (context) => const LoginScreen(),
     register: (context) => const RegistrationScreen(),
+    forgotPassword: (context) => const ForgotPasswordScreen(),
     // MODIFIED: /home now points to MainScreen
     home: (context) => const MainScreen(), 
     reportIncident: (context) => ReportIncidentScreen(),

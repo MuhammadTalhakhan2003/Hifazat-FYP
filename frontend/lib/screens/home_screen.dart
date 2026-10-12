@@ -16,9 +16,16 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+final Map<double, MaterialColor> _heatmapGradient = {
+  0.25: Colors.blue,
+  0.55: Colors.lightGreen,
+  0.75: Colors.amber,
+  0.9: Colors.deepOrange,
+  1.0: Colors.red,
+};
+
 class _HomeScreenState extends State<HomeScreen> {
   final MapController _mapController = MapController();
-  final StreamController<void> _rebuildStream = StreamController.broadcast();
   Timer? _debounce;
 
   @override
@@ -31,7 +38,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    _rebuildStream.close();
     _debounce?.cancel();
     super.dispose();
   }
@@ -110,40 +116,29 @@ class _HomeScreenState extends State<HomeScreen> {
 
                   if (mapProvider.isHeatmapVisible && mapProvider.heatmapData.isNotEmpty)
                     HeatMapLayer(
+                      // The layer caches rendered tiles, so rebuild it whenever the data changes
+                      key: ValueKey(mapProvider.heatmapVersion),
                       heatMapDataSource: InMemoryHeatMapDataSource(data: mapProvider.heatmapData),
                       heatMapOptions: HeatMapOptions(
-                        radius: 40,
-                        gradient: {
-                            0.2: Colors.blue,
-                            0.4: Colors.green,
-                            0.6: Colors.yellow,
-                            0.8: Colors.red,
-                            1.0: Colors.red,
-                        },
-                        minOpacity: 0.3,
+                        radius: 30,
+                        gradient: _heatmapGradient,
+                        minOpacity: 0.15,
                       ),
-                      reset: _rebuildStream.stream,
                     ),
                 ],
               ),
-              if (mapProvider.isHeatmapLoading)
+              if (mapProvider.isHeatmapVisible)
                 Positioned(
-                  top: 10,
-                  left: 10,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.black54,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
-                        SizedBox(width: 8),
-                        Text("Loading Hotspots...", style: TextStyle(color: Colors.white, fontSize: 12)),
-                      ],
-                    ),
+                  top: 12,
+                  left: 12,
+                  right: 12,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Flexible(child: _buildHeatmapStatus(mapProvider)),
+                      const SizedBox(width: 8),
+                      const _HeatmapLegend(),
+                    ],
                   ),
                 ),
             ],
@@ -171,6 +166,84 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () => Navigator.pushNamed(context, AppRoutes.reportIncident),
             tooltip: 'Report Incident',
             child: const Icon(Icons.add_location_alt),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeatmapStatus(MapProvider mapProvider) {
+    final (IconData? icon, String text) = mapProvider.isHeatmapLoading
+        ? (null, 'Analysing hotspots...')
+        : mapProvider.heatmapError != null
+            ? (Icons.error_outline, mapProvider.heatmapError!)
+            : mapProvider.heatmapEmpty
+                ? (Icons.check_circle_outline, 'No hotspots in this area')
+                : (Icons.whatshot, 'Hotspots predicted from reported incidents');
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.7),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon == null)
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+            )
+          else
+            Icon(icon, size: 16, color: Colors.white),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(text, style: const TextStyle(color: Colors.white, fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeatmapLegend extends StatelessWidget {
+  const _HeatmapLegend();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6)],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Incident risk', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          Container(
+            width: 110,
+            height: 8,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(4),
+              gradient: LinearGradient(colors: _heatmapGradient.values.toList()),
+            ),
+          ),
+          const SizedBox(height: 4),
+          const SizedBox(
+            width: 110,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('Low', style: TextStyle(fontSize: 10, color: Colors.black54)),
+                Text('High', style: TextStyle(fontSize: 10, color: Colors.black54)),
+              ],
+            ),
           ),
         ],
       ),

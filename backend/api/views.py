@@ -12,6 +12,18 @@ from django.db.models import Count, Max, Min
 from django.db.models.functions import ExtractHour, ExtractIsoWeekDay, TruncDay, TruncMonth, TruncYear
 from django.utils import timezone
 from datetime import timedelta
+import logging
+import secrets
+
+from django.contrib.auth.hashers import make_password, check_password
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.mail import send_mail
+from django.utils.html import escape
+from rest_framework.exceptions import ValidationError
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+
+logger = logging.getLogger(__name__)
 
 from rest_framework import generics, viewsets, status, permissions, mixins 
 from rest_framework.decorators import action
@@ -23,20 +35,22 @@ from rest_framework_gis.filters import InBBoxFilter # For geographic filtering
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 
-from .models import Profile, Category, Incident, IncidentMedia, Vote, Comment, Notification
+from .models import Profile, Category, Incident, IncidentMedia, Vote, Comment, Notification, PasswordResetCode
 from .serializers import (
     UserSerializer, RegisterSerializer, ProfileSerializer,
     CategorySerializer,
     IncidentMarkerSerializer, IncidentDetailSerializer, IncidentCreateUpdateSerializer,
     IncidentMediaSerializer, VoteCountSerializer,
     CommentSerializer, CommentCreateSerializer,
-    NotificationSerializer
+    NotificationSerializer,
+    PasswordResetRequestSerializer, PasswordResetVerifySerializer, PasswordResetConfirmSerializer,
 )
 from .permissions import IsOwnerOrReadOnly # Custom permission (we'll create this)
 # from django.contrib.gis.db.models.functions import X, Y
 
 import numpy as np
-from sklearn.neighbors import KernelDensity
+from scipy.ndimage import gaussian_filter
+from django.db import connection
 from django.utils.dateparse import parse_datetime # For parsing date filters if needed
 from django.db.models import Q # For complex queries
 
@@ -50,8 +64,141 @@ class RegisterView(generics.CreateAPIView):
 # JWT views are provided by simplejwt, we just need to route them
 
 
-# POST /auth/password-reset
-# POST /auth/password-reset/confirm
+# --- Password Reset (forgot password) Views ---
+# 1. POST /auth/password-reset/          {email}                     -> emails a 6-digit code
+# 2. POST /auth/password-reset/verify/   {email, code}               -> checks the code
+# 3. POST /auth/password-reset/confirm/  {email, code, new_password, new_password2} -> sets the password
+
+RESET_CODE_TTL = timedelta(minutes=10)
+RESET_CODE_RESEND_COOLDOWN = timedelta(seconds=60)
+RESET_CODE_MAX_ATTEMPTS = 5
+INVALID_CODE_MESSAGE = 'This code is invalid or has expired. Please request a new one.'
+
+
+def _send_reset_code_email(user, code):
+    minutes = int(RESET_CODE_TTL.total_seconds() // 60)
+    name = user.first_name or user.username
+    subject = 'Your Hifazat password reset code'
+    text = (
+        f"Hi {name},\n\n"
+        f"We received a request to reset your Hifazat password.\n\n"
+        f"Your verification code is: {code}\n\n"
+        f"This code expires in {minutes} minutes. If you didn't request this, "
+        f"you can safely ignore this email; your password won't change.\n\n"
+        f"- The Hifazat Team"
+    )
+    html = f"""
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;color:#1D1D1F">
+      <div style="background:#0F3460;color:#fff;padding:20px 24px;border-radius:8px 8px 0 0">
+        <h2 style="margin:0">Hifazat</h2>
+      </div>
+      <div style="border:1px solid #E6E8EE;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+        <p>Hi {escape(name)},</p>
+        <p>We received a request to reset your Hifazat password. Use this code to continue:</p>
+        <p style="font-size:32px;font-weight:bold;letter-spacing:8px;text-align:center;
+                  background:#F5F5F7;padding:16px;border-radius:8px;margin:24px 0">{code}</p>
+        <p>This code expires in {minutes} minutes.</p>
+        <p style="color:#666;font-size:13px">If you didn't request this, you can safely ignore this email;
+          your password won't change.</p>
+      </div>
+    </div>
+    """
+    send_mail(subject, text, None, [user.email], html_message=html)
+
+
+def _get_valid_reset_code(email, code):
+    """Returns the active PasswordResetCode for this email if `code` matches it,
+    otherwise raises a ValidationError. Wrong guesses count towards the attempt limit."""
+    reset = (PasswordResetCode.objects
+             .filter(user__email__iexact=email, user__is_active=True,
+                     is_used=False, expires_at__gt=timezone.now())
+             .select_related('user')
+             .first())
+    if reset is None or reset.attempts >= RESET_CODE_MAX_ATTEMPTS:
+        raise ValidationError({'code': [INVALID_CODE_MESSAGE]})
+
+    if not check_password(code, reset.code_hash):
+        PasswordResetCode.objects.filter(pk=reset.pk).update(attempts=F('attempts') + 1)
+        remaining = RESET_CODE_MAX_ATTEMPTS - reset.attempts - 1
+        if remaining <= 0:
+            raise ValidationError({'code': [INVALID_CODE_MESSAGE]})
+        raise ValidationError({'code': [f'Incorrect code. {remaining} attempt(s) left.']})
+    return reset
+
+
+class PasswordResetRequestView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []  # A stale token on the device must not block this
+
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+
+        user = (User.objects.filter(email__iexact=email, is_active=True)
+                .order_by(F('last_login').desc(nulls_last=True)).first())
+        if user:
+            now = timezone.now()
+            sent_recently = user.password_reset_codes.filter(
+                created_at__gt=now - RESET_CODE_RESEND_COOLDOWN).exists()
+            if not sent_recently:
+                code = f"{secrets.randbelow(10**6):06d}"
+                with transaction.atomic():
+                    # Only the newest code is ever valid
+                    user.password_reset_codes.filter(is_used=False).update(is_used=True)
+                    reset = PasswordResetCode.objects.create(
+                        user=user, code_hash=make_password(code), expires_at=now + RESET_CODE_TTL)
+                try:
+                    _send_reset_code_email(user, code)
+                except Exception:
+                    logger.exception("Failed to send password reset email to user %s", user.pk)
+                    reset.delete()
+                    return Response({'detail': "We couldn't send the email right now. Please try again later."},
+                                    status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        # Same response whether or not the email is registered, so accounts can't be probed
+        return Response({'detail': 'If an account exists for this email, a 6-digit code has been sent to it.'},
+                        status=status.HTTP_200_OK)
+
+
+class PasswordResetVerifyView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        serializer = PasswordResetVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        _get_valid_reset_code(serializer.validated_data['email'], serializer.validated_data['code'])
+        return Response({'detail': 'Code verified.'}, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        reset = _get_valid_reset_code(data['email'], data['code'])
+        user = reset.user
+        try:
+            validate_password(data['new_password'], user)
+        except DjangoValidationError as e:
+            raise ValidationError({'new_password': list(e.messages)})
+
+        with transaction.atomic():
+            user.set_password(data['new_password'])
+            user.save(update_fields=['password'])
+            reset.is_used = True
+            reset.save(update_fields=['is_used'])
+            # Sign the user out everywhere: blacklist every refresh token issued before the reset
+            for token in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=token)
+
+        return Response({'detail': 'Your password has been reset. You can now log in.'},
+                        status=status.HTTP_200_OK)
 
 
 # --- User Management Views ---
@@ -425,32 +572,6 @@ class PredictRiskView(APIView):
              "message": "Prediction model not yet implemented."
         })
 
-class PredictHotspotsView(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def get(self, request):
-        # TODO: Implement hotspot prediction logic
-        # - Get area/bbox query params
-        # - Query historical data
-        # - Use clustering or density analysis (or ML model)
-        # - Return GeoJSON FeatureCollection of hotspot areas/points
-        bbox_str = request.query_params.get('bbox') # e.g., "min_lon,min_lat,max_lon,max_lat"
-
-        # Placeholder response
-        return Response({
-            "type": "FeatureCollection",
-            "features": [
-                # Example hotspot feature
-                {
-                    "type": "Feature",
-                    "geometry": { "type": "Point", "coordinates": [73.05, 33.68] }, # Example coords
-                    "properties": { "intensity": 0.8, "crime_type": "Theft" }
-                }
-            ],
-            "message": "Hotspot prediction model not yet implemented."
-        })
-
-
 # --- Notifications ViewSet ---
 class NotificationViewSet(viewsets.GenericViewSet,
                           mixins.ListModelMixin,
@@ -502,142 +623,123 @@ class AdminVerifyIncidentView(APIView):
 # TODO: Admin Analytics View (GET /admin/analytics) - Custom view summarizing data
 
 class PredictHotspotsView(APIView):
-    permission_classes = [permissions.AllowAny] # Or IsAuthenticated
+    """
+    GET /predict/hotspots/?bbox=min_lon,min_lat,max_lon,max_lat
+
+    Predicts incident hotspots with a binned Gaussian Kernel Density Estimate:
+    PostGIS counts incidents per grid cell inside the (padded) bbox in one query,
+    then the counts are smoothed with a Gaussian kernel. This is the standard fast
+    approximation of KDE and stays quick with 100k+ incidents, unlike fitting a
+    KDE over every raw point in Python.
+
+    Optional params:
+    - category (id), start_date / end_date (YYYY-MM-DD): filter incidents
+    - bandwidth (degrees): kernel width; defaults to scale with the bbox (zoom level)
+    - grid_size (int, 20-200): cells along each axis, default 96
+
+    Always returns a GeoJSON FeatureCollection. Each feature is a grid cell centre
+    with a `density` normalised to 0..1 (1 = hottest cell in view).
+    """
+    permission_classes = [permissions.AllowAny]
+
+    PAD_RATIO = 0.1              # Count incidents slightly outside the view so edges aren't cut off
+    DEFAULT_SIGMA_CELLS = 1.5    # Kernel width in grid cells when no bandwidth is given
+    MIN_BANDWIDTH_DEG = 0.003    # ~300 m, so zooming far in doesn't shrink hotspots to dots
+    MIN_DENSITY = 0.12           # Drop cells cooler than this (after normalising) to keep payloads small
 
     def get(self, request):
-        """
-        Predicts crime hotspots using Kernel Density Estimation.
-        Accepts query parameters for filtering incidents:
-        - bbox (min_lon,min_lat,max_lon,max_lat): Bounding box for the area of interest. REQUIRED.
-        - category (id): Filter by category ID.
-        - start_date (YYYY-MM-DD): Filter incidents from this date.
-        - end_date (YYYY-MM-DD): Filter incidents up to this date.
-        - bandwidth (float): Bandwidth for KDE. Optional, defaults to a heuristic.
-        - grid_size (int): Number of points along each axis of the evaluation grid. Optional, defaults to 100.
-        """
         bbox_str = request.query_params.get('bbox')
         if not bbox_str:
             return Response({"error": "Bounding box (bbox) is a required parameter (format: min_lon,min_lat,max_lon,max_lat)."},
                             status=status.HTTP_400_BAD_REQUEST)
-
         try:
             min_lon, min_lat, max_lon, max_lat = map(float, bbox_str.split(','))
+            grid_size = min(max(int(request.query_params.get('grid_size', 96)), 20), 200)
+            bandwidth = request.query_params.get('bandwidth')
+            bandwidth = float(bandwidth) if bandwidth else None
         except ValueError:
-            return Response({"error": "Invalid bbox format. Use: min_lon,min_lat,max_lon,max_lat"},
+            return Response({"error": "Invalid parameters. bbox format: min_lon,min_lat,max_lon,max_lat"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if min_lon >= max_lon or min_lat >= max_lat:
+            return Response({"error": "Invalid bbox: min values must be smaller than max values."},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # --- Fetch Incident Data ---
-        queryset = Incident.objects.all()
+        # Map views can extend past the valid coordinate range
+        min_lon, max_lon = max(min_lon, -180.0), min(max_lon, 180.0)
+        min_lat, max_lat = max(min_lat, -90.0), min(max_lat, 90.0)
 
-        # Apply filters from query parameters
+        pad_lon = (max_lon - min_lon) * self.PAD_RATIO
+        pad_lat = (max_lat - min_lat) * self.PAD_RATIO
+        grid_min_lon, grid_max_lon = min_lon - pad_lon, max_lon + pad_lon
+        grid_min_lat, grid_max_lat = min_lat - pad_lat, max_lat + pad_lat
+        cell_lon = (grid_max_lon - grid_min_lon) / grid_size
+        cell_lat = (grid_max_lat - grid_min_lat) / grid_size
+
+        # --- 1. Count incidents per grid cell in the database ---
+        where = ["g && ST_MakeEnvelope(%s, %s, %s, %s, 4326)"]
+        params = [grid_min_lon, grid_min_lat, grid_max_lon, grid_max_lat]
+
         category_id = request.query_params.get('category')
-        start_date_str = request.query_params.get('start_date')
-        end_date_str = request.query_params.get('end_date')
-
         if category_id:
-            queryset = queryset.filter(category_id=category_id)
-        if start_date_str:
-            start_date = parse_datetime(start_date_str + "T00:00:00Z") # Assume start of day, UTC
-            if start_date:
-                queryset = queryset.filter(incident_date__gte=start_date)
-        if end_date_str:
-            end_date = parse_datetime(end_date_str + "T23:59:59Z") # Assume end of day, UTC
-            if end_date:
-                queryset = queryset.filter(incident_date__lte=end_date)
+            where.append("category_id = %s")
+            params.append(category_id)
+        start_date = parse_datetime(request.query_params.get('start_date', '') + "T00:00:00Z")
+        if start_date:
+            where.append("incident_date >= %s")
+            params.append(start_date)
+        end_date = parse_datetime(request.query_params.get('end_date', '') + "T23:59:59Z")
+        if end_date:
+            where.append("incident_date <= %s")
+            params.append(end_date)
 
-        # Filter by bounding box (using PostGIS functions for efficiency is better, but this is simpler for now)
-        # For production, use a spatial query: Incident.objects.filter(location__within=polygon_from_bbox)
-        # Here, we fetch then filter in Python, which is less efficient for large datasets.
-        incidents_in_area = []
-        # If you have many incidents, it's better to filter in DB first
-        # For now, let's fetch all based on other filters, then Python filter by bbox
-        # This is a SIMPLIFICATION. For production, use DB spatial queries.
-        all_filtered_incidents = queryset.values_list('location', flat=True) # Get Point objects
+        sql = f"""
+            SELECT LEAST(FLOOR((ST_X(g) - %s) / %s)::int, %s) AS ix,
+                   LEAST(FLOOR((ST_Y(g) - %s) / %s)::int, %s) AS iy,
+                   COUNT(*)
+            FROM (SELECT location::geometry AS g, category_id, incident_date
+                  FROM {Incident._meta.db_table}) AS incidents
+            WHERE {" AND ".join(where)}
+            GROUP BY ix, iy
+        """
+        last = grid_size - 1
+        with connection.cursor() as cursor:
+            cursor.execute(sql, [grid_min_lon, cell_lon, last, grid_min_lat, cell_lat, last] + params)
+            rows = cursor.fetchall()
 
-        locations = []
-        for point in all_filtered_incidents:
-            if point and (min_lon <= point.x <= max_lon and min_lat <= point.y <= max_lat):
-                locations.append([point.x, point.y]) # lon, lat for KDE
+        counts = np.zeros((grid_size, grid_size))  # [iy, ix]
+        for ix, iy, count in rows:
+            counts[iy, ix] = count
+        incident_count = int(counts.sum())
 
-        if not locations:
-            return Response({"message": "No incidents found in the specified area and filters to compute hotspots."},
-                            status=status.HTTP_200_OK)
+        # --- 2. Gaussian kernel smoothing = binned KDE ---
+        bandwidth_deg = bandwidth if bandwidth else self.DEFAULT_SIGMA_CELLS * max(cell_lon, cell_lat)
+        bandwidth_deg = max(bandwidth_deg, self.MIN_BANDWIDTH_DEG)
+        density = gaussian_filter(counts, sigma=(bandwidth_deg / cell_lat, bandwidth_deg / cell_lon), mode='constant')
 
-        X_train = np.array(locations) # shape (n_incidents, 2)
-
-        # --- Kernel Density Estimation ---
-        # Bandwidth: This is a critical parameter.
-        # Scott's rule or Silverman's rule are common heuristics, or cross-validation.
-        # A smaller bandwidth makes the estimate more spiky, a larger one makes it smoother.
-        # Example: 0.01 degrees is roughly 1.1km. Adjust based on your data scale.
-        bandwidth_str = request.query_params.get('bandwidth')
-        bandwidth = float(bandwidth_str) if bandwidth_str else 0.01 # Default bandwidth in degrees
-
-        try:
-            kde = KernelDensity(kernel='gaussian', bandwidth=bandwidth).fit(X_train)
-        except Exception as e:
-             return Response({"error": f"KDE fitting error: {str(e)}. Try adjusting bandwidth or ensure sufficient data points."},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-        # --- Evaluate KDE on a Grid ---
-        # Create a grid of points covering the bounding box
-        grid_size_str = request.query_params.get('grid_size')
-        grid_size = int(grid_size_str) if grid_size_str else 100 # Number of points along each axis
-
-        xx, yy = np.meshgrid(np.linspace(min_lon, max_lon, grid_size),
-                             np.linspace(min_lat, max_lat, grid_size))
-        xy_eval = np.vstack([xx.ravel(), yy.ravel()]).T # Grid points to evaluate
-
-        # Calculate log-density (KDE scores are log probabilities)
-        try:
-            log_dens = kde.score_samples(xy_eval)
-            densities = np.exp(log_dens)  # Convert log-density to density
-        except Exception as e:
-             return Response({"error": f"KDE scoring error: {str(e)}. This can happen with very few data points or extreme bandwidth."},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-        # --- Format Output ---
-        # Return points on the grid with their density scores.
-        # Frontend can then visualize these (e.g., using a heatmap library with these densities as intensities).
-        hotspot_points = []
-        # Normalize densities for easier visualization if desired, or filter by a threshold
-        # For simplicity, we return all grid points and their raw densities.
-        # A good frontend visualization will typically normalize or use a threshold.
-        min_density_threshold = densities.mean() # Example: only show points above average density
-
-        for i in range(len(xy_eval)):
-            if densities[i] > min_density_threshold: # Only include "hotter" points
-                hotspot_points.append({
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [xy_eval[i, 0], xy_eval[i, 1]] # lon, lat
-                    },
-                    "properties": {
-                        "density": float(densities[i]), # Ensure it's a standard float
-                        # "log_density": float(log_dens[i]) # Optionally return log density
-                    }
-                })
-        
-        if not hotspot_points:
-             return Response({
-                 "message": "No significant hotspots detected above the threshold.",
-                 "bbox": [min_lon, min_lat, max_lon, max_lat],
-                 "filter_incident_count": len(locations),
-                 "threshold_used": float(min_density_threshold)
-                }, status=status.HTTP_200_OK)
-
+        # --- 3. Normalise and keep the hot cells inside the view ---
+        features = []
+        peak = density.max()
+        if peak > 0:
+            # sqrt spreads the range so smaller hotspots stay visible next to big-city peaks
+            normalised = np.sqrt(density / peak)
+            for iy, ix in zip(*np.nonzero(normalised >= self.MIN_DENSITY)):
+                lon = grid_min_lon + (ix + 0.5) * cell_lon
+                lat = grid_min_lat + (iy + 0.5) * cell_lat
+                if min_lon <= lon <= max_lon and min_lat <= lat <= max_lat:
+                    features.append({
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [round(lon, 5), round(lat, 5)]},
+                        "properties": {"density": round(float(normalised[iy, ix]), 3)},
+                    })
 
         return Response({
             "type": "FeatureCollection",
-            "features": hotspot_points,
+            "features": features,
             "metadata": {
                 "bbox": [min_lon, min_lat, max_lon, max_lat],
-                "bandwidth_used": bandwidth,
+                "method": "binned gaussian kde",
+                "bandwidth_used": bandwidth_deg,
                 "grid_size": grid_size,
-                "filter_incident_count": len(locations),
-                "threshold_used": float(min_density_threshold)
-            }
+                "filter_incident_count": incident_count,
+            },
         }, status=status.HTTP_200_OK)
