@@ -9,3 +9,6 @@ id_*
 .DS_Store
 Thumbs.db
 *.code-workspace
+
+# Raw datasets (already imported into the database)
+*.csv

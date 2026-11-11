@@ -8,7 +8,7 @@ from django.contrib.gis.geos import Polygon # For creating a polygon from bbox
 # from django.contrib.gis.db.models.functions import X, Y # Import GeoDjango functions
 from django.db import transaction # For atomic vote updates
 from django.db.models import F # For atomic updates
-from django.db.models import Count, Max, Min
+from django.db.models import Count, Max, Min, Prefetch
 from django.db.models.functions import ExtractHour, ExtractIsoWeekDay, TruncDay, TruncMonth, TruncYear
 from django.utils import timezone
 from datetime import timedelta
@@ -45,6 +45,7 @@ from .serializers import (
     NotificationSerializer,
     PasswordResetRequestSerializer, PasswordResetVerifySerializer, PasswordResetConfirmSerializer,
 )
+from .pagination import IncidentPagination
 from .permissions import IsOwnerOrReadOnly # Custom permission (we'll create this)
 # from django.contrib.gis.db.models.functions import X, Y
 
@@ -273,6 +274,18 @@ class IncidentViewSet(viewsets.ModelViewSet):
     API endpoint for viewing, creating, updating, and deleting incidents.
     """
     queryset = Incident.objects.all().select_related('category', 'sub_category', 'created_by') # Optimize queries
+    pagination_class = IncidentPagination
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action == 'list':
+            # Load top-level comments for the whole page in one query instead of one per incident
+            qs = qs.prefetch_related(Prefetch(
+                'comments',
+                queryset=Comment.objects.filter(parent_comment=None).select_related('user__profile'),
+                to_attr='top_level_comments',
+            ))
+        return qs
     permission_classes = [permissions.IsAuthenticatedOrReadOnly, IsOwnerOrReadOnly] # Must be logged in to create, owner to edit/delete
     filter_backends = [InBBoxFilter, DjangoFilterBackend, SearchFilter, OrderingFilter] # Enable multiple filters
     # bbox_filter_field = 'location' # Specify the geometry field for InBBoxFilter

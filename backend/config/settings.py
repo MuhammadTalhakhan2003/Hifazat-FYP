@@ -213,7 +213,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticatedOrReadOnly', # Default: Read-only for anon, write for authenticated
     ),
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 1000, # Default page size
+    'PAGE_SIZE': 1000, # Default page size (incidents use their own smaller page; see api/pagination.py)
     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
     # Add this if you want GeoJSON feature ID behaviour for GeoFeatureModelSerializer
     # 'DEFAULT_MODEL_SERIALIZER_CLASS': 'rest_framework_gis.serializers.GeoFeatureModelSerializer',

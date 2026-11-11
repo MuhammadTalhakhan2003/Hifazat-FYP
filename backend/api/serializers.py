@@ -96,7 +96,10 @@ class IncidentMarkerSerializer(GeoFeatureModelSerializer):
 
     def get_comments(self, obj):
         # Depending on performance needs, serialize comments or just give a count/link
-        return CommentSerializer(obj.comments.filter(parent_comment=None), many=True, context=self.context).data
+        comments = getattr(obj, 'top_level_comments', None)  # Prefetched by IncidentViewSet.list
+        if comments is None:
+            comments = obj.comments.filter(parent_comment=None)
+        return CommentSerializer(comments, many=True, context=self.context).data
         #return obj.comments.filter(parent_comment=None).data
 
     def get_vote_summary(self, obj):
