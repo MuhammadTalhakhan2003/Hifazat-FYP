@@ -1,3 +1,7 @@
 {
+  "installCommand": "if [ ! -d /tmp/flutter ]; then git clone https://github.com/flutter/flutter.git -b 3.32.5 --depth 1 /tmp/flutter; fi && /tmp/flutter/bin/flutter config --no-analytics && /tmp/flutter/bin/flutter pub get",
+  "buildCommand": "/tmp/flutter/bin/flutter build web --release --dart-define=API_BASE_URL=${API_BASE_URL:-https://hifazat-backend.onrender.com/api}",
+  "outputDirectory": "build/web",
+  "framework": null,
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }
