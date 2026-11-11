@@ -10,5 +10,9 @@ class Constants {
   //   e.g., 'http://192.168.1.10:8000/api'. Your phone and computer must be on the SAME Wi-Fi network.
   //   You cannot use localhost or 127.0.0.1.
   //
-  static const String apiBaseUrl = 'http://127.0.0.1:8000/api';
+  // Override at build time: flutter build web --dart-define=API_BASE_URL=https://.../api
+  static const String apiBaseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'http://127.0.0.1:8000/api',
+  );
 }

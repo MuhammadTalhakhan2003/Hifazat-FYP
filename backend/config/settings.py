@@ -32,7 +32,16 @@ if not SECRET_KEY:
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DJANGO_DEBUG', 'False').strip().lower() in ('1', 'true', 'yes')
 
-ALLOWED_HOSTS = []
+def _env_list(name, default=''):
+    return [x.strip() for x in os.getenv(name, default).split(',') if x.strip()]
+
+ALLOWED_HOSTS = _env_list('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1')
+# Render sets this automatically for web services
+if os.getenv('RENDER_EXTERNAL_HOSTNAME'):
+    ALLOWED_HOSTS.append(os.getenv('RENDER_EXTERNAL_HOSTNAME'))
+CSRF_TRUSTED_ORIGINS = _env_list('DJANGO_CSRF_TRUSTED_ORIGINS')
+# Behind Render's HTTPS proxy
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
@@ -62,6 +71,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # Serves admin/static files in production
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware', # Add this
     'django.middleware.common.CommonMiddleware',
@@ -95,14 +105,15 @@ ASGI_APPLICATION = 'config.asgi.application'
 
 # Make sure redis-server is installed and running: sudo apt install redis-server
 # Check status: sudo systemctl status redis-server
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {
-            "hosts": [(os.getenv('REDIS_HOST', '127.0.0.1'), os.getenv('REDIS_PORT', 6379))],
-        },
-    },
-}
+# Redis is optional: without REDIS_URL / REDIS_HOST an in-memory layer is used (fine for a single instance).
+if os.getenv('REDIS_URL'):
+    CHANNEL_LAYERS = {"default": {"BACKEND": "channels_redis.core.RedisChannelLayer",
+                                  "CONFIG": {"hosts": [os.getenv('REDIS_URL')]}}}
+elif os.getenv('REDIS_HOST'):
+    CHANNEL_LAYERS = {"default": {"BACKEND": "channels_redis.core.RedisChannelLayer",
+                                  "CONFIG": {"hosts": [(os.getenv('REDIS_HOST'), int(os.getenv('REDIS_PORT', 6379)))]}}}
+else:
+    CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
 
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
@@ -117,6 +128,13 @@ DATABASES = {
         'PORT': os.getenv('DB_PORT', '5432'),
     }
 }
+
+# In production, a single DATABASE_URL (e.g. from Neon/Supabase) overrides the DB_* settings above.
+if os.getenv('DATABASE_URL'):
+    import dj_database_url
+    DATABASES['default'] = dj_database_url.parse(
+        os.getenv('DATABASE_URL'), conn_max_age=600, ssl_require=True)
+    DATABASES['default']['ENGINE'] = 'django.contrib.gis.db.backends.postgis'
 
 
 # Password validation
@@ -150,7 +168,6 @@ USE_I18N = True
 USE_TZ = True
 
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 # Add your frontend's domain/IP later for CORS
 
 # Static files (CSS, JavaScript, Images)
@@ -159,6 +176,10 @@ ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles' # For collectstatic
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
+}
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'

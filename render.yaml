@@ -1,0 +1,16 @@
+# Render Blueprint: deploys the Django API from backend/ using its Dockerfile.
+services:
+  - type: web
+    name: hifazat-backend
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/categories/
+    envVars:
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        sync: false   # paste your Neon/Supabase connection string in the Render dashboard
